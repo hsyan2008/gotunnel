@@ -6,7 +6,6 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -16,8 +15,6 @@ import (
 )
 
 var config tomlConfig
-var servers = make(map[string]*ssh.Client)
-var lock = new(sync.Mutex)
 
 func init() {
 	if _, err := toml.DecodeFile("main.toml", &config); err != nil {
@@ -41,7 +38,6 @@ func main() {
 }
 
 func connect(s server, i inner) {
-	c := connectServer(s)
 
 	lister, err := net.Listen("tcp", i.Bind)
 	if err != nil {
@@ -58,23 +54,31 @@ func connect(s server, i inner) {
 			logger.Warn("lister error:", err)
 		}
 
-		go hand(c, localConn, i)
+		go hand(localConn, s, i)
 	}
 }
 
-func hand(c *ssh.Client, localConn net.Conn, i inner) {
+func hand(localConn net.Conn, s server, i inner) {
+	c := connectServer(s)
+	defer func() {
+		_ = c.Close()
+	}()
+
 	sshConn, err := c.Dial("tcp", i.Addr)
 	if err != nil {
 		logger.Warn("dial remote error:", err)
 		return
 	}
 
-	go copyNet(localConn, sshConn)
-	go copyNet(sshConn, localConn)
+	var ch = make(chan bool, 0)
+	go copyNet(ch, localConn, sshConn)
+	go copyNet(ch, sshConn, localConn)
+	<-ch
+	<-ch
 }
 
 //考虑用select来改进
-func copyNet(src, des net.Conn) {
+func copyNet(ch chan bool, src, des net.Conn) {
 	defer func() {
 		//当ssh退出的时候，只是退出了远程连接，而本地连接未中断
 		//当在linux下还好，在window的xshell下，会被挂起
@@ -87,15 +91,10 @@ func copyNet(src, des net.Conn) {
 		//因为双向拷贝，有一个是正常退出，另一个是被迫关闭的，所以出现一个错误是正常的
 		logger.Warn("io copy error:", err)
 	}
+	ch <- true
 }
 
 func connectServer(s server) (c *ssh.Client) {
-	lock.Lock()
-	defer lock.Unlock()
-	c, ok := servers[s.Group]
-	if ok {
-		return c
-	}
 
 	config := &ssh.ClientConfig{
 		User: s.User,
@@ -111,8 +110,6 @@ func connectServer(s server) (c *ssh.Client) {
 		logger.Warn("connect server error:", err)
 		return
 	}
-
-	servers[s.Group] = c
 
 	return c
 }
