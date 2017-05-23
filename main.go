@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"os"
 	"sync"
@@ -13,6 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/BurntSushi/toml"
+	"github.com/hsyan2008/go-logger/logger"
 )
 
 var config tomlConfig
@@ -45,7 +45,8 @@ func connect(s server, i inner) {
 
 	lister, err := net.Listen("tcp", i.Bind)
 	if err != nil {
-		log.Println("bind error:", err)
+		logger.Warn("bind error:", err)
+		return
 	}
 	defer func() {
 		_ = lister.Close()
@@ -54,7 +55,7 @@ func connect(s server, i inner) {
 	for {
 		localConn, err := lister.Accept()
 		if err != nil {
-			log.Println("lister error:", err)
+			logger.Warn("lister error:", err)
 		}
 
 		go hand(c, localConn, i)
@@ -64,7 +65,8 @@ func connect(s server, i inner) {
 func hand(c *ssh.Client, localConn net.Conn, i inner) {
 	sshConn, err := c.Dial("tcp", i.Addr)
 	if err != nil {
-		log.Println("dial remote error:", err)
+		logger.Warn("dial remote error:", err)
+		return
 	}
 
 	go copyNet(localConn, sshConn)
@@ -83,7 +85,7 @@ func copyNet(src, des net.Conn) {
 	_, err := io.Copy(des, src)
 	if err != nil {
 		//因为双向拷贝，有一个是正常退出，另一个是被迫关闭的，所以出现一个错误是正常的
-		log.Println("io copy error:", err)
+		logger.Warn("io copy error:", err)
 	}
 }
 
@@ -106,7 +108,8 @@ func connectServer(s server) (c *ssh.Client) {
 	c, err := ssh.Dial("tcp", s.Addr, config)
 
 	if err != nil {
-		log.Println("connect server error:", err)
+		logger.Warn("connect server error:", err)
+		return
 	}
 
 	servers[s.Group] = c
@@ -121,7 +124,8 @@ func getAuth(auth string) ssh.AuthMethod {
 	if _, err := os.Stat(auth); err == nil {
 		key, _ = ioutil.ReadFile(auth)
 	} else {
-		log.Println("read key file error:", err)
+		logger.Warn("read key file error:", err)
+		return nil
 	}
 
 	//密码
@@ -135,7 +139,7 @@ func getAuth(auth string) ssh.AuthMethod {
 
 	signer, err := ssh.ParsePrivateKey(key)
 	if err != nil {
-		log.Println("parse private key error:", err)
+		logger.Warn("parse private key error:", err)
 	}
 
 	return ssh.PublicKeys(signer)
