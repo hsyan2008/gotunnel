@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -15,6 +16,8 @@ import (
 )
 
 var config tomlConfig
+var servers = make(map[string]*ssh.Client)
+var lock = new(sync.Mutex)
 
 func init() {
 	if _, err := toml.DecodeFile("main.toml", &config); err != nil {
@@ -24,20 +27,35 @@ func init() {
 }
 
 func main() {
-	var servers = map[string]server{}
+	var tmpServers = map[string]server{}
 	for _, v := range config.Server {
-		servers[v.Group] = v
+		tmpServers[v.Group] = v
 	}
 	for _, v := range config.Inner {
-		go connect(servers[v.Group], v)
+		go connect(tmpServers[v.Group], v)
 	}
 
 	for {
-		time.Sleep(10 * time.Second)
+		time.Sleep(config.Keep * time.Second)
+		for _, v := range servers {
+			exec(v)
+		}
+	}
+}
+
+func exec(s *ssh.Client) {
+	sess, _ := s.NewSession()
+	defer func() {
+		_ = sess.Close()
+	}()
+	_, err := sess.CombinedOutput("ls")
+	if err != nil {
+		logger.Warn("exec", err)
 	}
 }
 
 func connect(s server, i inner) {
+	c := connectServer(s)
 
 	lister, err := net.Listen("tcp", i.Bind)
 	if err != nil {
@@ -54,31 +72,23 @@ func connect(s server, i inner) {
 			logger.Warn("lister error:", err)
 		}
 
-		go hand(localConn, s, i)
+		go hand(c, localConn, i)
 	}
 }
 
-func hand(localConn net.Conn, s server, i inner) {
-	c := connectServer(s)
-	defer func() {
-		_ = c.Close()
-	}()
-
+func hand(c *ssh.Client, localConn net.Conn, i inner) {
 	sshConn, err := c.Dial("tcp", i.Addr)
 	if err != nil {
 		logger.Warn("dial remote error:", err)
 		return
 	}
 
-	var ch = make(chan bool, 0)
-	go copyNet(ch, localConn, sshConn)
-	go copyNet(ch, sshConn, localConn)
-	<-ch
-	<-ch
+	go copyNet(localConn, sshConn)
+	go copyNet(sshConn, localConn)
 }
 
 //考虑用select来改进
-func copyNet(ch chan bool, src, des net.Conn) {
+func copyNet(src, des net.Conn) {
 	defer func() {
 		//当ssh退出的时候，只是退出了远程连接，而本地连接未中断
 		//当在linux下还好，在window的xshell下，会被挂起
@@ -91,10 +101,15 @@ func copyNet(ch chan bool, src, des net.Conn) {
 		//因为双向拷贝，有一个是正常退出，另一个是被迫关闭的，所以出现一个错误是正常的
 		logger.Warn("io copy error:", err)
 	}
-	ch <- true
 }
 
 func connectServer(s server) (c *ssh.Client) {
+	lock.Lock()
+	defer lock.Unlock()
+	c, ok := servers[s.Group]
+	if ok {
+		return c
+	}
 
 	config := &ssh.ClientConfig{
 		User: s.User,
@@ -110,6 +125,8 @@ func connectServer(s server) (c *ssh.Client) {
 		logger.Warn("connect server error:", err)
 		return
 	}
+
+	servers[s.Group] = c
 
 	return c
 }
@@ -144,6 +161,7 @@ func getAuth(auth string) ssh.AuthMethod {
 
 type tomlConfig struct {
 	Title  string
+	Keep   time.Duration
 	Server []server
 	Inner  []inner
 }

@@ -1,4 +1,5 @@
 title = "Foward"
+keep  = 60
 
 #第一祖，支持多组配置，每组配置必须是最多一个server，最少一个inner
 [[server]]
