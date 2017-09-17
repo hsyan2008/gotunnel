@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -37,25 +38,44 @@ func main() {
 
 	for {
 		time.Sleep(config.Keep * time.Second)
-		for _, v := range servers {
-			exec(v)
+		for k, v := range servers {
+			if keepalive(v) != nil {
+				lock.Lock()
+				delete(servers, k)
+				lock.Unlock()
+			}
 		}
 	}
 }
 
-func exec(s *ssh.Client) {
-	sess, _ := s.NewSession()
+func keepalive(s *ssh.Client) (err error) {
+	defer func() {
+		if e := recover(); e != nil {
+			logger.Warn("keepalive error")
+			err = errors.New("keepalive error")
+		}
+	}()
+	sess, err := s.NewSession()
+	if err != nil {
+		logger.Warn("keepalive NewSession error")
+		return err
+	}
 	defer func() {
 		_ = sess.Close()
 	}()
-	_, err := sess.CombinedOutput("ls")
-	if err != nil {
-		logger.Warn("exec", err)
+	if err = sess.Shell(); err != nil {
+		logger.Warn("keepalive shell error")
+		return err
 	}
+	err = sess.Wait()
+	if err != nil {
+		logger.Warn("keepalive wait", err)
+	}
+
+	return
 }
 
 func connect(s server, i inner) {
-	c := connectServer(s)
 
 	lister, err := net.Listen("tcp", i.Bind)
 	if err != nil {
@@ -72,11 +92,17 @@ func connect(s server, i inner) {
 			logger.Warn("lister error:", err)
 		}
 
-		go hand(c, localConn, i)
+		go hand(s, localConn, i)
 	}
 }
 
-func hand(c *ssh.Client, localConn net.Conn, i inner) {
+func hand(s server, localConn net.Conn, i inner) {
+	defer func() {
+		if err := recover(); err != nil {
+			logger.Warn("hand err:", err)
+		}
+	}()
+	c := connectServer(s)
 	sshConn, err := c.Dial("tcp", i.Addr)
 	if err != nil {
 		logger.Warn("dial remote error:", err)
