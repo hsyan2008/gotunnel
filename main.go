@@ -1,188 +1,45 @@
 package main
 
 import (
-	"errors"
-	"fmt"
-	"io"
-	"io/ioutil"
-	"net"
 	"os"
-	"sync"
 	"time"
-
-	"golang.org/x/crypto/ssh"
 
 	"github.com/BurntSushi/toml"
 	"github.com/hsyan2008/go-logger/logger"
+	"github.com/hsyan2008/hfw2/ssh"
 )
 
 var config tomlConfig
-var servers = make(map[string]*ssh.Client)
-var lock = new(sync.Mutex)
 
 func init() {
 	if _, err := toml.DecodeFile("main.toml", &config); err != nil {
-		fmt.Println(err)
-		panic("load config error")
+		logger.Error(err)
+		os.Exit(1)
 	}
 }
 
 func main() {
-	var tmpServers = map[string]server{}
+	var tmpServers = map[string]ssh.SSHConfig{}
 	for _, v := range config.Server {
-		tmpServers[v.Group] = v
+		sshConfig := ssh.SSHConfig{
+			Addr: v.Addr,
+			User: v.User,
+			Auth: v.Auth,
+		}
+		tmpServers[v.Group] = sshConfig
 	}
 	for _, v := range config.Inner {
-		go connect(tmpServers[v.Group], v)
-	}
-
-	for {
-		time.Sleep(config.Keep * time.Second)
-		for k, v := range servers {
-			if keepalive(v) != nil {
-				lock.Lock()
-				delete(servers, k)
-				lock.Unlock()
-			}
-		}
-	}
-}
-
-func keepalive(s *ssh.Client) (err error) {
-	defer func() {
-		if e := recover(); e != nil {
-			logger.Warn("keepalive error")
-			err = errors.New("keepalive error")
-		}
-	}()
-	sess, err := s.NewSession()
-	if err != nil {
-		logger.Warn("keepalive NewSession error")
-		return err
-	}
-	defer func() {
-		_ = sess.Close()
-	}()
-	if err = sess.Shell(); err != nil {
-		logger.Warn("keepalive shell error")
-		return err
-	}
-	err = sess.Wait()
-	if err != nil {
-		logger.Warn("keepalive wait", err)
-	}
-
-	return
-}
-
-func connect(s server, i inner) {
-
-	lister, err := net.Listen("tcp", i.Bind)
-	if err != nil {
-		logger.Warn("bind error:", err)
-		return
-	}
-	defer func() {
-		_ = lister.Close()
-	}()
-
-	for {
-		localConn, err := lister.Accept()
+		l, err := ssh.NewLocal(tmpServers[v.Group], v.Bind, v.Addr)
 		if err != nil {
-			logger.Warn("lister error:", err)
+			logger.Error(v, err)
+			return
 		}
-
-		go hand(s, localConn, i)
-	}
-}
-
-func hand(s server, localConn net.Conn, i inner) {
-	defer func() {
-		if err := recover(); err != nil {
-			logger.Warn("hand err:", err)
-		}
-	}()
-	c := connectServer(s)
-	sshConn, err := c.Dial("tcp", i.Addr)
-	if err != nil {
-		logger.Warn("dial remote error:", err)
-		return
+		go func() {
+			_ = l.Do()
+		}()
 	}
 
-	go copyNet(localConn, sshConn)
-	go copyNet(sshConn, localConn)
-}
-
-//考虑用select来改进
-func copyNet(src, des net.Conn) {
-	defer func() {
-		//当ssh退出的时候，只是退出了远程连接，而本地连接未中断
-		//当在linux下还好，在window的xshell下，会被挂起
-		//所以双向拷贝，只有一个退出，所以直接两个都关闭，确保都退出
-		_ = src.Close()
-		_ = des.Close()
-	}()
-	_, err := io.Copy(des, src)
-	if err != nil {
-		//因为双向拷贝，有一个是正常退出，另一个是被迫关闭的，所以出现一个错误是正常的
-		logger.Warn("io copy error:", err)
-	}
-}
-
-func connectServer(s server) (c *ssh.Client) {
-	lock.Lock()
-	defer lock.Unlock()
-	c, ok := servers[s.Group]
-	if ok {
-		return c
-	}
-
-	config := &ssh.ClientConfig{
-		User: s.User,
-		Auth: []ssh.AuthMethod{
-			getAuth(s.Auth),
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
-
-	c, err := ssh.Dial("tcp", s.Addr, config)
-
-	if err != nil {
-		logger.Warn("connect server error:", err)
-		return
-	}
-
-	servers[s.Group] = c
-
-	return c
-}
-
-func getAuth(auth string) ssh.AuthMethod {
-	//是文件
-	var key []byte
-
-	if _, err := os.Stat(auth); err == nil {
-		key, _ = ioutil.ReadFile(auth)
-	} else {
-		logger.Warn("read key file error:", err)
-		return nil
-	}
-
-	//密码
-	if len(key) == 0 {
-		if len(auth) < 50 {
-			return ssh.Password(auth)
-		} else {
-			key = []byte(auth)
-		}
-	}
-
-	signer, err := ssh.ParsePrivateKey(key)
-	if err != nil {
-		logger.Warn("parse private key error:", err)
-	}
-
-	return ssh.PublicKeys(signer)
+	select {}
 }
 
 type tomlConfig struct {
