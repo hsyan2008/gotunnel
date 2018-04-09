@@ -6,6 +6,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/hsyan2008/go-logger/logger"
+	hfw "github.com/hsyan2008/hfw2"
 	"github.com/hsyan2008/hfw2/ssh"
 )
 
@@ -21,25 +22,18 @@ func init() {
 func main() {
 	var tmpServers = map[string]ssh.SSHConfig{}
 	for _, v := range config.Server {
-		sshConfig := ssh.SSHConfig{
-			Addr: v.Addr,
-			User: v.User,
-			Auth: v.Auth,
-		}
-		tmpServers[v.Group] = sshConfig
+		tmpServers[v.Group] = v.SSHConfig
 	}
 	for _, v := range config.Inner {
-		l, err := ssh.NewLocal(tmpServers[v.Group], v.Bind, v.Addr)
+		l, err := ssh.NewLocalForward(tmpServers[v.Group], v.ForwardIni)
+		defer l.Close()
 		if err != nil {
 			logger.Error(v, err)
 			return
 		}
-		go func() {
-			_ = l.Do()
-		}()
 	}
 
-	select {}
+	_ = hfw.Run()
 }
 
 type tomlConfig struct {
@@ -51,13 +45,10 @@ type tomlConfig struct {
 
 type server struct {
 	Group string `toml:"group"`
-	Addr  string `toml:"addr"`
-	User  string `toml:"user"`
-	Auth  string `toml:"auth"`
+	ssh.SSHConfig
 }
 
 type inner struct {
 	Group string `toml:"group"`
-	Addr  string `toml:"addr"`
-	Bind  string `toml:"bind"`
+	ssh.ForwardIni
 }

@@ -1,4 +1,5 @@
 # gotunnel
+已废弃，请访问[gossh](https://github.com/hsyan2008/gossh)  
 ssh tunnel tool for forward by golang，一个用golang写的ssh隧道工具
 
 ###特性
